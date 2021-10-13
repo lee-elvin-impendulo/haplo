@@ -31,6 +31,13 @@ class KAppExporter
       puts "Application files will not be exported."
     end
 
+    erase_history = false
+    if options.include?('nohistory')
+      erase_history = true
+      puts "API keys, Audit trail, Keychain credentials, and Object store history will not be exported"
+      puts "Uploaded filenames, user names and emails, and group names and emails will be permanently anonymised before export"
+    end
+
     # ---------------------------------------------------------------------------------------------
 
     # Basic details of the app are stored in a JSON file
@@ -52,6 +59,9 @@ class KAppExporter
 
     data["serverClassificationTags"] = KInstallProperties.server_classification_tags
     data["configurationData"] = JSON.parse(KApp.global(:javascript_config_data) || '{}')
+    if erase_history
+      data["configurationData"] = '{}'
+    end
 
     File.open("#{filename_base}.json",'w') do |file|
       file.write JSON.pretty_generate(data)
@@ -60,7 +70,22 @@ class KAppExporter
     # ---------------------------------------------------------------------------------------------
 
     # Dump the application's schema from the database
-    dump_cmd = "pg_dump --schema=a#{app_id} --no-owner #{KFRAMEWORK_DATABASE_NAME} | gzip -9 - > #{filename_base}.sql.gz"
+    if erase_history
+      # remove original filenames
+      remote_process.remote_system "psql -d #{KFRAMEWORK_DATABASE_NAME} -c \"UPDATE a#{app_id}.stored_files SET upload_filename = 'anonymous.file';\""
+      # anonymise users
+      remote_process.remote_system "psql -d #{KFRAMEWORK_DATABASE_NAME} -c \"UPDATE a#{app_id}.users SET name = CONCAT('Anonymous User ', id), name_first = 'Anonymous', name_last = CONCAT('User ', id), email = CONCAT('user', id, '@example.com') WHERE kind IN (0,8,16) AND password IS NOT NULL;\""
+      # anonymise groups
+      remote_process.remote_system "psql -d #{KFRAMEWORK_DATABASE_NAME} -c \"UPDATE a#{app_id}.users SET name = CONCAT('Anonymous Group ', id), email = CASE WHEN email IS NULL THEN NULL ELSE CONCAT('group',id,'@example.com') END WHERE KIND IN (1,17);\""
+      # anonymise plugin data and system config
+      remote_process.remote_system "psql -d #{KFRAMEWORK_DATABASE_NAME} -c \"UPDATE a#{app_id}.app_globals SET value_string = '{}' WHERE key = 'javascript_config_data' OR key like '_pjson_%';\""
+    end
+    dump_cmd = "pg_dump --schema=a#{app_id} "
+    if erase_history
+      # exclude API keys, Audit trail, Keychain credentials, Object store history...
+      dump_cmd = "#{dump_cmd}--exclude-table-data=*.api_keys --exclude-table-data=*.audit_entries --exclude-table-data=*.keychain_credentials --exclude-table-data=*.os_objects_old "
+    end
+    dump_cmd = "#{dump_cmd}--no-owner #{KFRAMEWORK_DATABASE_NAME} | gzip -9 - > #{filename_base}.sql.gz"
     remote_process.remote_system dump_cmd
 
     # ---------------------------------------------------------------------------------------------
